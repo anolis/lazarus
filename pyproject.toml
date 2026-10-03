@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lazarus-desktop"
+version = "0.1.0"
+description = "Restore desktop apps and terminal work after reboot"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+lazarus = "lazarus.cli:main"
+
+[tool.setuptools]
+packages = ["lazarus"]
+
+[tool.setuptools.package-data]
+lazarus = ["assets/*.png"]

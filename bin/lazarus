@@ -1,0 +1,9 @@
+#!/usr/bin/python3
+"""Run directly from a checkout, without an installation step."""
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from lazarus.cli import main
+
+raise SystemExit(main())

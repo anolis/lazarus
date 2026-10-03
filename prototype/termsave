@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Snapshot every open kitty / gnome-terminal shell (cwd + what's running) into a kitty
+# session file. Restore after reboot with:  kitty --session ~/.config/kitty/restore.session
+set -euo pipefail
+
+OUT="${1:-$HOME/.config/kitty/restore.session}"
+mkdir -p "$(dirname "$OUT")"
+
+# Map a running command line to the command that resumes it.
+resume_cmd() {
+  local args="$1"
+  case "$args" in
+    *claude*--resume\ [A-Za-z0-9_-]*)
+      echo "claude --resume $(sed -E 's/.*claude.*--resume ([A-Za-z0-9_-]+).*/\1/' <<<"$args")" ;;
+    *claude*)                        echo "claude --continue" ;;
+    *bin/codex*)                     echo "codex resume --last" ;;
+    ""|*termsave*|zsh|-zsh|/usr/bin/zsh|bash|-bash) echo "" ;;
+    *)                               echo "$args" ;;
+  esac
+}
+
+{
+  echo "# saved $(date '+%F %T') by termsave"
+  n=0
+  for pid in $(pgrep -u "$USER" -x 'zsh|bash|fish'); do
+    tty=$(ps -o tty= -p "$pid" | tr -d ' ')
+    [[ "$tty" == "?" ]] && continue
+    parent=$(ps -o comm= -p "$(ps -o ppid= -p "$pid" | tr -d ' ')")
+    [[ "$parent" == kitty || "$parent" == gnome-terminal* ]] || continue
+
+    cwd=$(readlink "/proc/$pid/cwd")
+    # Oldest foreground process on the tty that isn't this login shell.
+    fg=$(ps -o pid=,stat=,args= -t "$tty" --sort=pid \
+         | awk -v sh="$pid" '$1 != sh && $2 ~ /\+/ { $1=""; $2=""; sub(/^ +/, ""); print; exit }')
+    cmd=$(resume_cmd "$fg")
+
+    echo
+    echo "new_os_window"
+    echo "cd $cwd"
+    if [[ -n "$cmd" ]]; then
+      q=${cmd//\'/\'\"\'\"\'}
+      echo "launch --title '$(basename "$cwd"): $(basename "${cmd%% *}")' zsh -ic '$q; exec zsh'"
+    else
+      echo "launch --title '$(basename "$cwd")' zsh"
+    fi
+    n=$((n + 1))
+  done
+} > "$OUT"
+
+# Music: relaunch VLC with whatever it was opened with (else its current MPRIS url).
+EXTRAS="${OUT%.session}-extras.sh"
+music="none"
+{
+  echo "#!/usr/bin/env bash"
+  if vpid=$(pgrep -x vlc | head -1); then
+    mapfile -d '' args < "/proc/$vpid/cmdline"
+    files=()
+    for a in "${args[@]:1}"; do [[ "$a" == -* ]] || files+=("$a"); done
+    if (( ${#files[@]} == 0 )); then
+      url=$(dbus-send --session --print-reply --dest=org.mpris.MediaPlayer2.vlc /org/mpris/MediaPlayer2 \
+            org.freedesktop.DBus.Properties.Get string:org.mpris.MediaPlayer2.Player string:Metadata 2>/dev/null \
+            | grep -A1 '"xesam:url"' | tail -1 | grep -oE '"[^"]+"' | tr -d '"')
+      [[ -n "$url" ]] && files=("$url")
+    fi
+    if (( ${#files[@]} > 0 )); then
+      echo "setsid -f vlc $(printf '%q ' "${files[@]}")>/dev/null 2>&1"
+      music="vlc ${files[*]}"
+    fi
+  fi
+  echo
+  # Every other open GUI app (firefox, discord, codium, ...).
+  "$(dirname "$0")/appsave"
+} > "$EXTRAS"
+chmod +x "$EXTRAS"
+
+echo "saved $n terminals -> $OUT"
+echo "music: $music"
+echo "apps: $(grep -c '^setsid' "$EXTRAS") launch lines -> $EXTRAS"
+echo "restore: termrestore"

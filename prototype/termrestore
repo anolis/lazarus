@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Restore what termsave snapshotted: music first, then every terminal as a kitty window.
+d="${1:-$HOME/.config/kitty}"
+# Don't leak the launching process's env (e.g. running this from inside Claude Code:
+# CLAUDE_CODE_CHILD_SESSION makes every restored `claude` think it's a subagent and
+# turns transcript saving off).
+for v in $(compgen -e | grep -E '^(CLAUDE|CLAUDECODE)'); do unset "$v"; done
+log="$HOME/.cache/termrestore.log"
+echo "== termrestore $(date '+%F %T')" >> "$log"
+[[ -x "$d/restore-extras.sh" ]] && "$d/restore-extras.sh" >> "$log" 2>&1
+setsid -f kitty --session "$d/restore.session" >> "$log" 2>&1

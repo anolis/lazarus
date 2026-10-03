@@ -1,0 +1,5 @@
+Generated with the built-in image_gen tool, 2026-10-03.
+Transparent background requested. Original PNG preserved without edits.
+
+Prompt:
+Use case: logo-brand. Asset type: Linux desktop application icon for Lazarus, a system tray utility that restores desktop sessions after reboot. Create one bold, polished icon: a compact stack of two dark rounded desktop windows embraced by a vivid mint-green circular return arrow, suggesting bringing your workspace back to life. The front window has just a simple terminal chevron and underscore. Strong silhouette, thick clean shapes, restrained flat dimensional shading, crisp edges. Centered square composition, fills 85 percent of canvas, readable at small tray sizes. True transparent background outside the icon. No text labels, no wordmark, no extra symbols, no mockup, no watermark. Output a single icon.

@@ -152,7 +152,7 @@ def resolve(pid, wm_instance, wm_class, title, desktops):
     return argv[:1]
 
 
-def capture(include_autostart=False):
+def capture(include_autostart=False, include_runtime=False):
     out = subprocess.run(["wmctrl", "-lpx"], capture_output=True, text=True, check=True, timeout=10).stdout
     desktops, autostart = load_desktops(), autostart_names()
     seen_pids, seen_cmds = set(), set()
@@ -163,7 +163,7 @@ def capture(include_autostart=False):
         wid, pid = parts[0], parts[2]
         title = parts[5] if len(parts) > 5 else ""
         wm_instance, wm_class = wm_class_of(wid)
-        if pid == "0" or wm_instance.lower() in SKIP_CLASSES or wm_class.lower() in SKIP_CLASSES \
+        if pid in {"0", str(os.getpid())} or wm_instance.lower() in SKIP_CLASSES or wm_class.lower() in SKIP_CLASSES \
                 or "gnome-terminal" in (wm_instance + wm_class).lower():
             continue
         if pid in seen_pids and wm_instance != "nemo":
@@ -174,11 +174,14 @@ def capture(include_autostart=False):
             continue
         argv = resolve(pid, wm_instance, wm_class, title, desktops)
         cmd = shlex.join(argv)
-        if not argv or cmd in seen_cmds:
+        if not argv or (cmd in seen_cmds and not include_runtime):
             continue
         seen_cmds.add(cmd)
-        yield {"kind": "app", "label": f"{wm_class or wm_instance}: {title[:60]}",
-               "argv": argv, "cwd": HOME, "identity": (wm_class or wm_instance).lower() or exe}
+        item = {"kind": "app", "label": f"{wm_class or wm_instance}: {title[:60]}",
+                "argv": argv, "cwd": HOME, "identity": (wm_class or wm_instance).lower() or exe}
+        if include_runtime:
+            item["_pid"] = int(pid)
+        yield item
 
 
 if __name__ == "__main__":

@@ -33,6 +33,42 @@ running items. Automatic saving starts after one minute.
 updates `latest`; profiles change only when you explicitly save over them.
 **Restore Session…** previews the previous session before launching it.
 
+## Switch profiles without logging out
+
+Choose a target under **Restore at Login**, then select **Restart into Selected
+Profile…**. The preview lists the windows to close and the saved items to launch.
+After you confirm, Lazarus saves a separate `recovery-…` snapshot, requests normal
+window closes, and waits for the tracked processes to exit before restoring the
+selected profile. **Previous Session** is pinned before the recovery save, so the
+restart cannot accidentally replace its own target. **Don't Restore** requires
+selecting a target first; it does not close your desktop into an empty session.
+
+Respond to unsaved-work dialogs normally. If anything remains running after 15
+seconds, the switch pauses. Close those apps (including any background instances)
+and choose **Continue Restart…**, or choose **Cancel Restart**. Continue retries
+normal close requests. No processes are force-killed. Terminal servers may remain
+running, but their tracked shells and child processes must exit.
+
+Automatic saves and other Lazarus restore operations pause during the switch.
+Cancelling before confirmation leaves your session alone. Cancelling after some
+windows close does not reopen them; the recovery snapshot remains available:
+
+```sh
+./bin/lazarus list
+./bin/lazarus restore recovery-YYYYMMDD-HHMMSS-IDENTIFIER --dry-run
+./bin/lazarus restore recovery-YYYYMMDD-HHMMSS-IDENTIFIER
+```
+
+On a failed, interrupted, or partially cancelled restart, autosave stays paused
+to preserve recovery information, including after Lazarus starts again. Use
+**Save Session** when your desktop is ready to resume automatic saving. Saved
+recovery and pinned-target snapshots remain until you remove them yourself.
+
+Restart closes only the tracked windows shown in its preview. Autostart apps,
+unrecognized terminals, and newly opened apps are outside that scope. It is a
+workspace switch, not a replacement for a desktop logout. Recovery snapshots
+contain launch instructions, not unsaved document contents or process memory.
+
 ## CLI
 
 ```sh

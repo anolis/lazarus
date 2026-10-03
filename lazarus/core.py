@@ -1,5 +1,6 @@
 """Capture, persist, and restore structured desktop snapshots."""
 import collections
+from contextlib import contextmanager, nullcontext
 import datetime
 import fcntl
 import json
@@ -38,6 +39,11 @@ def atomic_write(path, content, mode=0o600):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -75,7 +81,7 @@ def resume(argv):
     return argv
 
 
-def terminals():
+def terminals(include_runtime=False):
     table = process_table()
     # Do not snapshot Lazarus (or its invoking CLI agent) as foreground work.
     ancestors, current = set(), os.getpid()
@@ -99,9 +105,12 @@ def terminals():
             argv = []
         shell = (apps.proc_argv(pid) or [proc["comm"]])[0].lstrip("-")
         command = resume(argv)
-        yield {"kind": "terminal", "label": f"{Path(cwd).name}: {shlex.join(command) or shell}",
+        item = {"kind": "terminal", "label": f"{Path(cwd).name}: {shlex.join(command) or shell}",
                "cwd": cwd, "argv": command, "shell": shell,
                "emulator": "kitty" if parent == "kitty" else "gnome-terminal"}
+        if include_runtime:
+            item.update(_pid=pid, _emulator_pid=proc["parent"])
+        yield item
 
 
 def check_desktop():
@@ -157,6 +166,25 @@ def load(name):
     return validate(json.loads(snapshot_path(name).read_text()))
 
 
+@contextmanager
+def session_lock():
+    """One desktop operation at a time, including across CLI and tray processes."""
+    state_dir().mkdir(parents=True, exist_ok=True)
+    with (state_dir() / "restore.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError("Another desktop operation is in progress; finish or cancel it first") from None
+        yield
+
+
+def capture_save(name="latest"):
+    with session_lock():
+        data = capture()
+        save(name, data)
+        return data
+
+
 def identity(item):
     if item["kind"] == "app":
         return ("app", item["identity"])
@@ -195,7 +223,12 @@ def clean_env():
 
 
 def restore(name, dry_run=False, force=False, only=None):
-    data = load(name)
+    return restore_snapshot(load(name), dry_run, force, only)
+
+
+def restore_snapshot(data, dry_run=False, force=False, only=None, *, locked=False):
+    """Restore a pinned snapshot, without re-reading a mutable snapshot name."""
+    validate(data)
     items = data["items"]
     if only:
         unknown = set(only) - {item["id"] for item in items}
@@ -205,8 +238,7 @@ def restore(name, dry_run=False, force=False, only=None):
     check_desktop()
     state_dir().mkdir(parents=True, exist_ok=True)
     # Serialize restore invocations so captures and launches cannot interleave.
-    with (state_dir() / "restore.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with nullcontext() if locked else session_lock():
         running = list(terminals()) + list(apps.capture(include_autostart=True))
         failures = 0
         with (state_dir() / "restore.log").open("a") as log:

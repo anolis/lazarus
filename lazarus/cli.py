@@ -72,8 +72,7 @@ def main(argv=None):
             from .tray import run
             return run(getattr(args, "restore", False))
         if args.action == "save":
-            data = core.capture()
-            core.save(args.name, data)
+            data = core.capture_save(args.name)
             print(f"Saved {len(data['items'])} items to {core.snapshot_path(args.name)}")
         elif args.action == "restore":
             return core.restore(args.name, args.dry_run, args.force, args.only)
@@ -85,7 +84,7 @@ def main(argv=None):
                 if not args.name or args.name == "latest":
                     raise ValueError("Give the profile a name other than 'latest'")
                 if args.operation == "save":
-                    core.save(args.name, core.capture())
+                    core.capture_save(args.name)
                 else:
                     core.load(args.name)
                     set_restore_target(args.name)

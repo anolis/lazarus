@@ -4,7 +4,7 @@ from pathlib import Path
 import threading
 import signal
 
-from . import core
+from . import core, restart
 from .cli import autostart_path, set_autostart, preferences, set_restore_target
 
 
@@ -29,15 +29,19 @@ def run(restore_on_login=False):
         def __init__(self):
             self.busy = False
             self.ending = False
-            self.autosave_enabled = True
+            self.autosave_enabled = not restart.marker_path().exists()
+            self.restart_job = None
             self.menu = Gtk.Menu()
             self.status = Gtk.MenuItem(label="Lazarus — desktop sessions")
             self.status.set_sensitive(False)
             self.menu.append(self.status)
             self.menu.append(Gtk.SeparatorMenuItem())
-            self.add("Save Session", self.save)
-            self.add("Restore Session…", self.preview)
-            self.add("Save Current Session as Profile…", self.save_profile)
+            self.session_actions = [self.add("Save Session", self.save),
+                                    self.add("Restore Session…", self.preview),
+                                    self.add("Save Current Session as Profile…", self.save_profile)]
+            self.restart_action = self.add("Restart into Selected Profile…", self.restart_selected)
+            self.cancel_restart_action = self.add("Cancel Restart", self.cancel_restart)
+            self.cancel_restart_action.set_sensitive(False)
             self.targets = Gtk.MenuItem(label="Restore at Login")
             self.menu.append(self.targets)
             self.refresh_targets()
@@ -47,7 +51,7 @@ def run(restore_on_login=False):
             startup.set_active(autostart_path().exists())
             startup.connect("toggled", self.startup)
             self.menu.append(startup)
-            self.add("Quit", lambda *_: Gtk.main_quit())
+            self.quit_action = self.add("Quit", lambda *_: Gtk.main_quit())
             self.menu.show_all()
             icon_path = str(Path(__file__).resolve().parent / "assets/lazarus.png")
             # Prefer AppIndicator; Cinnamon also supports the X11 StatusIcon fallback.
@@ -77,6 +81,7 @@ def run(restore_on_login=False):
             item = Gtk.MenuItem(label=label)
             item.connect("activate", callback)
             self.menu.append(item)
+            return item
 
         def error(self, error):
             dialog = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE,
@@ -85,7 +90,7 @@ def run(restore_on_login=False):
             dialog.run()
             dialog.destroy()
 
-        def work(self, operation, success):
+        def work(self, operation, success, on_success=None, on_error=None):
             if self.busy:
                 return
             self.busy = True
@@ -100,13 +105,22 @@ def run(restore_on_login=False):
                 self.busy = False
                 self.status.set_label("Lazarus — " + ("action failed" if error else success))
                 if error:
+                    if on_error:
+                        on_error(error)
                     self.error(error)
+                elif on_success:
+                    on_success(result)
                 return False
             threading.Thread(target=worker, daemon=True).start()
 
         def save(self, *_):
+            if self.busy or self.restart_job:
+                return
             self.autosave_enabled = True
-            self.work(lambda: core.save("latest", core.capture()), "session saved")
+            def operation():
+                core.capture_save("latest")
+                restart.marker_path().unlink(missing_ok=True)
+            self.work(operation, "session saved")
 
         def autosave(self):
             if not self.ending and self.autosave_enabled:
@@ -118,7 +132,8 @@ def run(restore_on_login=False):
             selected = preferences().get("restore")
             choices = [("Previous Session", "latest"), ("Don't Restore", None)]
             choices += [(p.stem, p.stem) for p in sorted(core.state_dir().glob("*.json"))
-                        if p.stem not in {"latest", "preferences"}]
+                        if p.stem not in {"latest", "preferences"}
+                        and not p.stem.startswith(("recovery-", "restart-target-"))]
             group = None
             for label, target in choices:
                 item = Gtk.RadioMenuItem.new_with_label(group, label)
@@ -137,7 +152,7 @@ def run(restore_on_login=False):
                     self.error(error)
 
         def save_profile(self, *_):
-            if self.busy:
+            if self.busy or self.restart_job:
                 return
             dialog = Gtk.Dialog(title="Save a session profile")
             dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
@@ -151,7 +166,7 @@ def run(restore_on_login=False):
             if response != Gtk.ResponseType.OK:
                 return
             try:
-                if name in {"latest", "preferences"}:
+                if name in {"latest", "preferences"} or name.startswith(("recovery-", "restart-target-")):
                     raise ValueError("That name is reserved for automatic session state")
                 path = core.snapshot_path(name)
                 if path.exists():
@@ -163,13 +178,15 @@ def run(restore_on_login=False):
                     if not accepted:
                         return
                 def operation():
-                    core.save(name, core.capture())
+                    core.capture_save(name)
                     GLib.idle_add(self.refresh_targets)
                 self.work(operation, "profile saved")
             except (OSError, ValueError) as error:
                 self.error(error)
 
         def restore(self, name="latest"):
+            if self.restart_job:
+                return False
             def operation():
                 if core.restore(name):
                     self.autosave_enabled = False
@@ -178,7 +195,7 @@ def run(restore_on_login=False):
             return False
 
         def preview(self, *_):
-            if self.busy:
+            if self.busy or self.restart_job:
                 return
             try:
                 data = core.load("latest")
@@ -207,9 +224,104 @@ def run(restore_on_login=False):
             except OSError as error:
                 self.error(error)
 
+        def restart_controls(self, active, waiting=False):
+            for item in self.session_actions:
+                item.set_sensitive(not active)
+            self.quit_action.set_sensitive(not active)
+            self.restart_action.set_label("Continue Restart…" if active else "Restart into Selected Profile…")
+            self.restart_action.set_sensitive(not active or waiting)
+            self.cancel_restart_action.set_sensitive(active and waiting)
+
+        def restart_failed(self, error):
+            if self.restart_job:
+                self.restart_job.close()
+                self.restart_job = None
+            self.restart_controls(False)
+            # Keep autosave paused and the marker intact after any partial switch.
+
+        def restart_selected(self, *_):
+            if self.busy:
+                return
+            if self.restart_job:
+                self.run_restart_step(first=False)
+                return
+            self._autosave_before_restart = self.autosave_enabled
+            self.autosave_enabled = False
+            self.restart_controls(True)
+            def failed(error):
+                self.autosave_enabled = self._autosave_before_restart
+                self.restart_controls(False)
+            self.work(lambda: restart.Restart(preferences().get("restore")), "restart preview ready",
+                      on_success=self.confirm_restart, on_error=failed)
+
+        def confirm_restart(self, job):
+            self.restart_job = job
+            self.busy = True  # Gtk.Dialog runs a nested event loop; keep autosave out.
+            dialog = Gtk.Dialog(title="Restart into selected profile")
+            dialog.set_default_size(720, 500)
+            dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+            dialog.add_button("Close Windows and Restart", Gtk.ResponseType.OK)
+            view = Gtk.TextView(editable=False, cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD_CHAR)
+            view.get_buffer().set_text(job.preview())
+            scroll = Gtk.ScrolledWindow()
+            scroll.add(view)
+            dialog.get_content_area().pack_start(scroll, True, True, 12)
+            dialog.show_all()
+            response = dialog.run()
+            dialog.destroy()
+            self.busy = False
+            if response == Gtk.ResponseType.OK:
+                self.run_restart_step(first=True)
+            else:
+                self.cancel_restart()
+
+        def run_restart_step(self, first):
+            job = self.restart_job
+            self.restart_controls(True)
+            def operation():
+                if first:
+                    job.begin()
+                else:
+                    job.ask_to_close()
+                remaining = job.wait()
+                if not remaining:
+                    job.finish()
+                return remaining
+            def completed(remaining):
+                if remaining:
+                    self.restart_controls(True, waiting=True)
+                    self.status.set_label("Lazarus — restart paused; waiting for apps")
+                    dialog = Gtk.MessageDialog(message_type=Gtk.MessageType.INFO, buttons=Gtk.ButtonsType.CLOSE,
+                                               text="Restart paused: work is still running")
+                    dialog.format_secondary_text("\n".join(remaining) +
+                        "\n\nSave your work and close these apps (including apps running in the background). "
+                        "Then choose Continue Restart from the tray, or Cancel Restart. "
+                        "Continue sends another normal close request.\n\nRecovery: " + job.recovery_name)
+                    dialog.run()
+                    dialog.destroy()
+                else:
+                    self.restart_job = None
+                    self.autosave_enabled = True
+                    self.restart_controls(False)
+                    self.status.set_label("Lazarus — profile restarted")
+            self.work(operation, "restart checked", on_success=completed, on_error=self.restart_failed)
+
+        def cancel_restart(self, *_):
+            if self.busy or not self.restart_job:
+                return
+            started = self.restart_job.started
+            self.restart_job.close()
+            self.restart_job = None
+            # After a partial close, retain the recovery marker and pause autosave.
+            self.autosave_enabled = False if started else self._autosave_before_restart
+            self.restart_controls(False)
+            self.status.set_label("Lazarus — restart cancelled" + ("; autosave paused" if started else ""))
+
     tray = Tray()
     target = preferences().get("restore")
-    if restore_on_login and target and core.snapshot_path(target).exists():
+    if restart.marker_path().exists():
+        tray.status.set_label("Lazarus — interrupted restart; autosave paused")
+    if restore_on_login and not restart.marker_path().exists() and target and core.snapshot_path(target).exists():
         GLib.timeout_add_seconds(10, tray.restore, target)
     # Keep a crash fallback even if the desktop doesn't send logout notifications.
     GLib.timeout_add_seconds(60, tray.autosave)
@@ -219,7 +331,7 @@ def run(restore_on_login=False):
             return
         tray.ending = True
         try:
-            core.save("latest", core.capture())
+            core.capture_save("latest")
         except Exception as error:
             print(f"Final save failed; keeping periodic snapshot: {error}", flush=True)
 
